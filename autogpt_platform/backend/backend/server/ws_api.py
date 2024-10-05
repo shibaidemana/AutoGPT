@@ -2,7 +2,8 @@ import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
-from starlette.types import Scope
+from starlette.types import Scope, Receive, Send, ASGIApp
+import json
 
 import uvicorn
 from autogpt_libs.auth import parse_jwt_token
@@ -22,12 +23,12 @@ logger.setLevel(logging.DEBUG)
 
 # Create handlers
 c_handler = logging.StreamHandler(sys.stdout)
-f_handler = logging.FileHandler('ws_api.log')
+f_handler = logging.FileHandler("ws_api.log")
 c_handler.setLevel(logging.DEBUG)
 f_handler.setLevel(logging.DEBUG)
 
 # Create formatters and add it to handlers
-log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 c_formatter = logging.Formatter(log_format)
 f_formatter = logging.Formatter(log_format)
 c_handler.setFormatter(c_formatter)
@@ -40,6 +41,40 @@ logger.addHandler(f_handler)
 settings = Settings()
 
 
+class CustomASGIApp:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] == "websocket":
+            logger.debug(f"[WebSocket] Incoming connection: {scope}")
+            await self.handle_websocket(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+    async def handle_websocket(self, scope: Scope, receive: Receive, send: Send):
+        async def intercepted_receive():
+            message = await receive()
+            if message["type"] == "websocket.receive":
+                logger.debug(f"[WebSocket] Received message: {message.get('text', message.get('bytes', ''))}")
+            return message
+
+        async def intercepted_send(message):
+            if message["type"] == "websocket.send":
+                logger.debug(f"[WebSocket] Sending message: {message.get('text', message.get('bytes', ''))}")
+            await send(message)
+
+        try:
+            await self.app(scope, intercepted_receive, intercepted_send)
+        except Exception as e:
+            logger.exception(f"[WebSocket] Error in WebSocket connection: {e}")
+            await send({
+                "type": "websocket.close",
+                "code": 1011,
+                "reason": f"WebSocket connection failed: {str(e)}".encode(),
+            })
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await event_queue.connect()
@@ -49,12 +84,13 @@ async def lifespan(app: FastAPI):
     await event_queue.close()
 
 
-app = FastAPI(lifespan=lifespan)
+fastapi_app = FastAPI(lifespan=lifespan)
+app = CustomASGIApp(fastapi_app)  # Wrap the FastAPI app with our custom ASGI app
 event_queue = AsyncRedisEventQueue()
 _connection_manager = None
 
 logger.info(f"CORS allow origins: {settings.config.backend_cors_allow_origins}")
-app.add_middleware(
+fastapi_app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.config.backend_cors_allow_origins,
     allow_credentials=True,
@@ -152,12 +188,12 @@ async def handle_unsubscribe(
         )
 
 
-@app.get("/")
+@fastapi_app.get("/")
 async def health():
     return {"status": "healthy"}
 
 
-@app.websocket("/ws")
+@fastapi_app.websocket("/ws")
 async def websocket_router(
     websocket: WebSocket, manager: ConnectionManager = Depends(get_connection_manager)
 ):
@@ -165,13 +201,27 @@ async def websocket_router(
     try:
         # Log the full scope for debugging
         logger.debug(f"[WebSocket] Connection scope: {websocket.scope}")
-        
+
+        # Log headers individually
+        logger.debug("[WebSocket] Headers:")
+        for header, value in websocket.headers.items():
+            logger.debug(f"  {header}: {value}")
+
+        # Log query parameters
+        logger.debug(f"[WebSocket] Query params: {websocket.query_params}")
+
+        # Log the request (removed _request attribute access)
+        logger.debug(f"[WebSocket] Request: {websocket.scope}")
+
         user_id = await authenticate_websocket(websocket)
         if not user_id:
             logger.warning(f"[WebSocket] Authentication failed for {websocket.client}")
             return
+
+        logger.info(f"[WebSocket] Attempting to connect for user {user_id}")
         await manager.connect(websocket)
         logger.info(f"[WebSocket] Connected for user {user_id}")
+
         try:
             while True:
                 data = await websocket.receive_text()
@@ -208,8 +258,10 @@ async def websocket_router(
 
 class WebsocketServer(AppProcess):
     def run(self):
-        logger.info(f"Starting WebSocket server on {Config().websocket_server_host}:{Config().websocket_server_port}")
-        uvicorn.run(
+        logger.info(
+            f"Starting WebSocket server on {Config().websocket_server_host}:{Config().websocket_server_port}"
+        )
+        config = uvicorn.Config(
             app,
             host=Config().websocket_server_host,
             port=Config().websocket_server_port,
@@ -243,7 +295,13 @@ class WebsocketServer(AppProcess):
                 "loggers": {
                     "uvicorn": {"handlers": ["default"], "level": "INFO"},
                     "uvicorn.error": {"level": "INFO"},
-                    "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+                    "uvicorn.access": {
+                        "handlers": ["access"],
+                        "level": "INFO",
+                        "propagate": False,
+                    },
                 },
             },
         )
+        server = uvicorn.Server(config)
+        server.run()

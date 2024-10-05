@@ -7,15 +7,15 @@ import * as Sentry from "@sentry/nextjs";
 Sentry.init({
   dsn: "https://fe4e4aa4a283391808a5da396da20159@o4505260022104064.ingest.us.sentry.io/4507946746380288",
 
-  enabled: process.env.DISABLE_SENTRY !== "true",
+  enabled: false,
 
   // Add optional integrations for additional features
   integrations: [
     Sentry.replayIntegration(),
     Sentry.httpClientIntegration(),
-    Sentry.replayCanvasIntegration(),
-    Sentry.reportingObserverIntegration(),
-    Sentry.browserProfilingIntegration(),
+    // Sentry.replayCanvasIntegration(),
+    // Sentry.reportingObserverIntegration(),
+    // Sentry.browserProfilingIntegration(),
     // Sentry.feedbackIntegration({
     //   // Additional SDK configuration goes in here, for example:
     //   colorScheme: "system",
