@@ -1,0 +1,14 @@
+{
+  "configurations": [
+    {
+      "name": "Python: FastAPI",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "autogpt_platform.backend.backend.app",
+      "env": {
+        "ENV": "dev"
+      },
+      "justMyCode": false
+    }
+  ]
+}
